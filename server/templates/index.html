@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>냉장고 물체 인식 테스트</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --surface: #ffffff;
+    --border: #e2e5eb;
+    --text: #1a1d23;
+    --muted: #6b7280;
+    --accent: #3b6fe0;
+    --accent-text: #ffffff;
+    --green-bg: #e8f8ee; --green-text: #1f8a4c;
+    --amber-bg: #fff4e0; --amber-text: #b8720a;
+    --red-bg: #fdeaea; --red-text: #c0392b;
+    --blue-bg: #eaf1fd; --blue-text: #3b6fe0;
+  }
+  body {
+    font-family: -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 24px 16px 64px;
+    text-align: center;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .meta { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+  a.dash-link {
+    display: inline-block;
+    font-size: 13px;
+    color: var(--accent);
+    text-decoration: none;
+    margin-bottom: 16px;
+  }
+  .section-label {
+    font-size: 12px; color: var(--muted); margin: 18px 0 6px;
+    text-align: left; max-width: 480px; margin-left: auto; margin-right: auto;
+  }
+  #live, #snapshot, #detectImg {
+    width: 100%;
+    max-width: 480px;
+    aspect-ratio: 4 / 3;
+    object-fit: cover;
+    border-radius: 12px;
+    border: 2px solid var(--border);
+    background: #eceef1;
+  }
+  #live { border-color: #34c759; }
+  #snapshot { opacity: 0.3; }
+  #detectImg { border-color: var(--accent); }
+  button {
+    margin-top: 16px;
+    font-size: 16px;
+    padding: 12px 28px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--accent);
+    color: var(--accent-text);
+    cursor: pointer;
+  }
+  button.secondary { background: var(--surface); color: var(--text); }
+  button.danger { background: var(--red-bg); color: var(--red-text); border-color: var(--red-bg); }
+  button:disabled { background: #d7d9de; color: #8a8f99; cursor: not-allowed; border-color: #d7d9de; }
+  #status, #detectStatus { margin-top: 10px; font-size: 14px; color: var(--muted); min-height: 20px; }
+
+  .card {
+    max-width: 480px;
+    margin: 12px auto 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 20px;
+    text-align: left;
+    display: none;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  }
+  .card.show { display: block; }
+  .item-name { font-size: 20px; font-weight: 700; }
+  .item-name.not-item { color: var(--amber-text); }
+  .row { margin-top: 8px; font-size: 14px; color: var(--muted); }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 12px;
+    background: var(--green-bg);
+    color: var(--green-text);
+    margin-right: 6px;
+  }
+  .badge.category { background: var(--blue-bg); color: var(--blue-text); }
+  .badge.low { background: var(--red-bg); color: var(--red-text); }
+  .badge.medium { background: var(--amber-bg); color: var(--amber-text); }
+  #error {
+    max-width: 480px;
+    margin: 16px auto 0;
+    color: var(--red-text);
+    font-size: 14px;
+    display: none;
+    white-space: pre-wrap;
+  }
+
+  #detectSection {
+    max-width: 480px;
+    margin: 28px auto 0;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+  }
+  .door-badge {
+    display: inline-block;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 4px 12px;
+    border-radius: 20px;
+    margin-bottom: 4px;
+  }
+  .door-badge.open { background: var(--amber-bg); color: var(--amber-text); }
+  .door-badge.closed { background: var(--green-bg); color: var(--green-text); }
+  .door-badge.unknown { background: var(--border); color: var(--muted); }
+  #detectConfirm {
+    max-width: 480px;
+    margin: 14px auto 0;
+    background: var(--blue-bg);
+    border: 1px solid #cfe0fb;
+    border-radius: 12px;
+    padding: 16px 18px;
+    text-align: left;
+    display: none;
+  }
+  #detectConfirm .head { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+  #detectConfirm .head img {
+    width: 56px; height: 56px; object-fit: cover; border-radius: 8px;
+    border: 1px solid #cfe0fb; flex-shrink: 0;
+  }
+  #detectConfirm .q { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  #detectConfirm .info { font-size: 13px; color: var(--muted); }
+  #detectConfirm .btns { display: flex; gap: 10px; }
+  #detectConfirm .btns button { margin-top: 0; flex: 1; }
+</style>
+</head>
+<body>
+  <h1>냉장고 물체 인식 테스트</h1>
+  <div class="meta">포트: {{ serial_port }} · 모델: {{ model }}</div>
+  <a class="dash-link" href="{{ backend_url }}/dashboard">🧊 내 냉장고 재고 대시보드 보기 →</a>
+  <div><a class="dash-link" href="/dashboard" style="font-size:11px;color:var(--muted);">(로컬 촬영 기록 보기)</a></div>
+
+  <div class="section-label">🟢 실시간 미리보기</div>
+  <img id="live" src="/video_feed" alt="실시간 미리보기 연결 중...">
+
+  <div>
+    <button id="capBtn" onclick="capture()">📷 촬영 및 인식</button>
+  </div>
+  <div id="status"></div>
+
+  <div class="section-label">마지막 촬영 결과</div>
+  <img id="snapshot" src="/static/latest.jpg" alt="아직 촬영한 사진이 없습니다"
+       onerror="this.style.opacity=0.15">
+
+  <div id="result" class="card">
+    <div id="foodName" class="item-name">-</div>
+    <div class="row">
+      <span id="categoryBadge" class="badge category">-</span>
+      <span id="confidenceBadge" class="badge">-</span>
+    </div>
+    <div class="row" id="description"></div>
+  </div>
+  <div id="error"></div>
+
+  <div id="detectSection">
+    <div class="section-label" style="margin-top:0;">🔎 실시간 객체 탐지</div>
+    <div><span id="doorStatus" class="door-badge unknown">🚪 문 상태 확인 중...</span></div>
+    <button id="detectBtn" class="secondary" onclick="toggleDetect()">🔎 실시간 탐지 시작</button>
+    <div id="detectStatus"></div>
+
+    <img id="detectImg" alt="탐지 대기 중" style="display:none;">
+
+    <div id="detectConfirm">
+      <div class="head">
+        <img id="detectConfirmThumb" src="" alt="탐지된 사진">
+        <div>
+          <div class="q">이 물건을 재고에 추가할까요?</div>
+          <div class="info" id="detectConfirmText"></div>
+        </div>
+      </div>
+      <div class="btns">
+        <button onclick="answerConfirm(true)">✅ 추가</button>
+        <button class="secondary" onclick="answerConfirm(false)">건너뛰기</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+async function capture() {
+  const btn = document.getElementById('capBtn');
+  const status = document.getElementById('status');
+  const errorBox = document.getElementById('error');
+  const resultBox = document.getElementById('result');
+  const snapshot = document.getElementById('snapshot');
+
+  btn.disabled = true;
+  status.textContent = '캡처 중... (실시간 미리보기가 잠시 멈춥니다)';
+  errorBox.style.display = 'none';
+  resultBox.classList.remove('show');
+
+  try {
+    const res = await fetch('/api/capture', { method: 'POST' });
+    const data = await res.json();
+
+    if (!data.ok) {
+      throw new Error(data.error || '알 수 없는 오류');
+    }
+
+    snapshot.src = data.image_url;
+    snapshot.style.opacity = 1;
+
+    if (data.error) {
+      status.textContent = '사진은 캡처했지만 인식에 실패했습니다.';
+      errorBox.textContent = data.error;
+      errorBox.style.display = 'block';
+    } else {
+      const r = data.result;
+      status.textContent = '완료 (실시간 미리보기 재개됨)';
+      const nameEl = document.getElementById('foodName');
+      nameEl.textContent = r.is_fridge_item
+        ? `${r.item_name_ko} (${r.item_name_en})`
+        : `냉장고 물건 아님 - ${r.item_name_ko || '?'}`;
+      nameEl.classList.toggle('not-item', !r.is_fridge_item);
+
+      const catBadge = document.getElementById('categoryBadge');
+      catBadge.textContent = r.food_category;
+
+      const badge = document.getElementById('confidenceBadge');
+      badge.textContent = '신뢰도: ' + r.confidence;
+      badge.className = 'badge ' + r.confidence;
+
+      document.getElementById('description').textContent = r.description;
+      resultBox.classList.add('show');
+
+      if (data.backend_error) {
+        status.textContent = '완료 (재고 대시보드 반영 실패)';
+        errorBox.textContent = data.backend_error;
+        errorBox.style.display = 'block';
+      } else if (data.inventory_entry) {
+        status.textContent = `완료 - 냉장고 재고에 추가됨 (${data.inventory_entry.item_name_ko})`;
+      }
+    }
+  } catch (e) {
+    status.textContent = '오류가 발생했습니다.';
+    errorBox.textContent = String(e.message || e);
+    errorBox.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---------- 실시간 객체 탐지 ----------
+let detecting = false;
+let detectTimer = null;
+const DETECT_DELAY_MS = 3000;
+
+function toggleDetect() {
+  detecting = !detecting;
+  const btn = document.getElementById('detectBtn');
+  const capBtn = document.getElementById('capBtn');
+  btn.textContent = detecting ? '⏹ 실시간 탐지 중지' : '🔎 실시간 탐지 시작';
+  capBtn.disabled = detecting;
+
+  const detectImg = document.getElementById('detectImg');
+  if (detecting) {
+    // 탐지 중에만 실시간 스트림 연결을 연다 (대기 중엔 불필요한 연결을 만들지 않음)
+    detectImg.src = '/video_feed?_=' + Date.now();
+    detectImg.style.display = 'block';
+    runDetectCycle();
+  } else {
+    if (detectTimer) clearTimeout(detectTimer);
+    document.getElementById('detectConfirm').style.display = 'none';
+    document.getElementById('detectStatus').textContent = '탐지 중지됨';
+    detectImg.src = '';
+    detectImg.style.display = 'none';
+  }
+}
+
+async function runDetectCycle() {
+  if (!detecting) return;
+  const status = document.getElementById('detectStatus');
+  status.textContent = '탐지 중...';
+
+  try {
+    // 탐지 화면(#detectImg)은 항상 /video_feed를 실시간으로 보여주므로
+    // 여기서는 캡처된 사진 URL만 기억해뒀다가(확인창에서 사용) 갱신하지 않는다.
+    const res = await fetch('/api/detect', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || '알 수 없는 오류');
+
+    if (data.error) {
+      status.textContent = '인식 실패: ' + data.error;
+    } else if (data.result && data.result.is_fridge_item) {
+      status.textContent = `감지됨: ${data.result.item_name_ko} - 추가할까요?`;
+      showConfirm(data.result, data.image_url);
+      return; // 사용자가 답할 때까지 다음 사이클을 예약하지 않음
+    } else {
+      status.textContent = '냉장고에 넣을 물건이 감지되지 않음';
+    }
+  } catch (e) {
+    status.textContent = '오류: ' + (e.message || e);
+  }
+
+  scheduleNextDetectCycle();
+}
+
+function scheduleNextDetectCycle() {
+  if (!detecting) return;
+  detectTimer = setTimeout(runDetectCycle, DETECT_DELAY_MS);
+}
+
+function showConfirm(result, imageUrl) {
+  const box = document.getElementById('detectConfirm');
+  box.style.display = 'block';
+  document.getElementById('detectConfirmThumb').src = imageUrl;
+  document.getElementById('detectConfirmText').textContent =
+    `${result.item_name_ko} (${result.item_name_en}) · ${result.food_category} · 신뢰도 ${result.confidence}`;
+}
+
+async function answerConfirm(add) {
+  const box = document.getElementById('detectConfirm');
+  box.style.display = 'none';
+  const status = document.getElementById('detectStatus');
+
+  if (add) {
+    status.textContent = '재고에 추가하는 중...';
+    try {
+      const res = await fetch('/api/detect/confirm', { method: 'POST' });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || '알 수 없는 오류');
+      status.textContent = `추가 완료: ${data.item.label}`;
+    } catch (e) {
+      status.textContent = '추가 실패: ' + (e.message || e);
+    }
+  } else {
+    status.textContent = '건너뜀';
+  }
+
+  scheduleNextDetectCycle();
+}
+
+// ---------- 냉장고 문 개폐 상태 (리드스위치, SSE로 실시간 수신) ----------
+const BACKEND_URL = "{{ backend_url }}";
+let lastDoorOpen = null; // 아직 한 번도 못 받아온 상태
+
+function applyDoorState(data) {
+  const badge = document.getElementById('doorStatus');
+  if (data.is_open === true) {
+    badge.textContent = '🚪 문 열림';
+    badge.className = 'door-badge open';
+  } else if (data.is_open === false) {
+    badge.textContent = '🚪 문 닫힘';
+    badge.className = 'door-badge closed';
+  } else {
+    badge.textContent = '🚪 문 상태 알 수 없음 (센서 신호 없음)';
+    badge.className = 'door-badge unknown';
+  }
+
+  // 문이 "막" 열렸을 때만 자동 시작, "막" 닫혔을 때만 자동 중지 (수동 조작과 충돌 방지)
+  if (data.is_open === true && lastDoorOpen !== true && !detecting) {
+    toggleDetect();
+  } else if (data.is_open === false && lastDoorOpen === true && detecting) {
+    toggleDetect();
+  }
+  lastDoorOpen = data.is_open;
+}
+
+function connectDoorStream() {
+  const es = new EventSource(BACKEND_URL + '/api/door/stream');
+  es.onmessage = (evt) => {
+    try {
+      applyDoorState(JSON.parse(evt.data));
+    } catch (e) { /* 무시하고 다음 이벤트 대기 */ }
+  };
+  es.onerror = () => {
+    // 연결이 끊기면 브라우저가 자동 재연결을 시도한다 - 그동안 상태만 표시.
+    const badge = document.getElementById('doorStatus');
+    badge.textContent = '🚪 백엔드 연결 끊김 (재연결 시도 중...)';
+    badge.className = 'door-badge unknown';
+  };
+}
+
+connectDoorStream();
+</script>
+</body>
+</html>

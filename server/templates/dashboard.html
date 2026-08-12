@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>냉장고 재고 대시보드</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --surface: #ffffff;
+    --border: #e2e5eb;
+    --text: #1a1d23;
+    --muted: #6b7280;
+    --accent: #3b6fe0;
+  }
+  body {
+    font-family: -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 24px 16px 64px;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  .top-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  h1 { font-size: 20px; margin: 0; }
+  .actions { display: flex; gap: 8px; }
+  button, a.btn {
+    font-size: 13px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-block;
+  }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.danger { background: #fdeaea; color: #c0392b; border-color: #fbd5d5; }
+  #status { font-size: 13px; color: var(--muted); margin: 12px 0; }
+  .category {
+    margin-top: 22px;
+  }
+  .category h2 {
+    font-size: 15px;
+    color: var(--accent);
+    margin: 0 0 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .chip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 6px 10px 6px 6px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+  }
+  .chip img {
+    width: 40px;
+    height: 40px;
+    object-fit: cover;
+    border-radius: 6px;
+    background: #eceef1;
+  }
+  .chip .name { font-size: 14px; font-weight: 600; }
+  .chip .sub { font-size: 11px; color: var(--muted); }
+  .chip .count {
+    font-size: 11px;
+    color: #1f8a4c;
+    background: #e8f8ee;
+    border-radius: 6px;
+    padding: 1px 6px;
+    margin-left: 2px;
+  }
+  #empty {
+    margin-top: 40px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 14px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top-row">
+    <h1>🧊 내 냉장고 재고</h1>
+    <div class="actions">
+      <a class="btn" href="/">← 촬영으로</a>
+      <button onclick="load()">새로고침</button>
+      <button class="danger" onclick="clearAll()">전체 초기화</button>
+    </div>
+  </div>
+  <div id="status"></div>
+  <div id="categories"></div>
+  <div id="empty">아직 인식된 식재료가 없습니다. 촬영 페이지에서 물건을 인식시켜 보세요.</div>
+</div>
+
+<script>
+async function load() {
+  const status = document.getElementById('status');
+  const container = document.getElementById('categories');
+  const empty = document.getElementById('empty');
+  status.textContent = '불러오는 중...';
+
+  try {
+    const res = await fetch('/api/inventory');
+    const groups = await res.json();
+    container.innerHTML = '';
+
+    const categories = Object.keys(groups);
+    if (categories.length === 0) {
+      empty.style.display = 'block';
+      status.textContent = '';
+      return;
+    }
+    empty.style.display = 'none';
+
+    for (const cat of categories) {
+      const items = groups[cat];
+      const section = document.createElement('div');
+      section.className = 'category';
+
+      const h2 = document.createElement('h2');
+      h2.textContent = `${cat} (${items.length})`;
+      section.appendChild(h2);
+
+      const chips = document.createElement('div');
+      chips.className = 'chips';
+      for (const item of items) {
+        const chip = document.createElement('div');
+        chip.className = 'chip';
+        chip.innerHTML = `
+          <img src="${item.image_url}" alt="${item.item_name_ko}">
+          <div>
+            <div class="name">${item.item_name_ko}${item.count > 1 ? `<span class="count">x${item.count}</span>` : ''}</div>
+            <div class="sub">${item.item_name_en || ''}</div>
+          </div>
+        `;
+        chips.appendChild(chip);
+      }
+      section.appendChild(chips);
+      container.appendChild(section);
+    }
+    status.textContent = '';
+  } catch (e) {
+    status.textContent = '불러오기 실패: ' + (e.message || e);
+  }
+}
+
+async function clearAll() {
+  if (!confirm('전체 재고 목록을 지울까요?')) return;
+  await fetch('/api/inventory/clear', { method: 'POST' });
+  load();
+}
+
+load();
+</script>
+</body>
+</html>

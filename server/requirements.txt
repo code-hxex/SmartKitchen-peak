@@ -1,0 +1,6 @@
+flask
+pyserial
+anthropic
+pillow
+python-dotenv
+requests

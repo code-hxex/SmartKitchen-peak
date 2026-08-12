@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "skills": {
+    "xiao-esp32s3": {
+      "source": "shain1912/esp32-skills",
+      "sourceType": "github",
+      "skillPath": "skills/xiao-esp32s3/SKILL.md",
+      "computedHash": "2d98190fcdbecdbe69020c8fc7ac5aa9b3749a282b3138a05b6e5274c71f1eac"
+    },
+    "xiao-i2c-sensors": {
+      "source": "shain1912/esp32-skills",
+      "sourceType": "github",
+      "skillPath": "skills/xiao-i2c-sensors/SKILL.md",
+      "computedHash": "2e31c56e161420fd06541a0b755bd46a64ce1358a049a6a3be381274d63addd3"
+    },
+    "xiao-serial-monitor": {
+      "source": "shain1912/esp32-skills",
+      "sourceType": "github",
+      "skillPath": "skills/xiao-serial-monitor/SKILL.md",
+      "computedHash": "3faf5063b835e6d2c89de0ecc0ad32ff1bad0283a4361d6f2c73229041b961e2"
+    },
+    "xiao-webcam-ap": {
+      "source": "shain1912/esp32-skills",
+      "sourceType": "github",
+      "skillPath": "skills/xiao-webcam-ap/SKILL.md",
+      "computedHash": "9332bc103e0a4f6f2c89b8131bb5a98ab15bcb7f7a58b98bbb365406f626337b"
+    },
+    "xiao-webcam-sta": {
+      "source": "shain1912/esp32-skills",
+      "sourceType": "github",
+      "skillPath": "skills/xiao-webcam-sta/SKILL.md",
+      "computedHash": "2c02aac90a5918b067e4a5fb53bc9717e6a47ff8cdb428c65cbf177f09e3f98e"
+    }
+  }
+}

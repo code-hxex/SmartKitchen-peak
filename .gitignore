@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+server/static/latest.jpg
+server/static/detect_latest.jpg
+server/static/inventory/
+server/data/
+backend/data/
