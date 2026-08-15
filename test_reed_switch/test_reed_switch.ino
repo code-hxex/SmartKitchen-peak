@@ -67,17 +67,13 @@ void setup() {
 }
 
 void loop() {
-  static int lastState = -1;
-
   bool isOpen = readIsOpenRaw();
-  int state = isOpen ? 1 : 0;
 
-  if (state != lastState) {
-    lastState = state;
-    Serial.printf("door = %-6s (raw pin = %s)\n",
-                  isOpen ? "OPEN" : "CLOSED",
-                  digitalRead(REED_GPIO_NUM) == HIGH ? "HIGH" : "LOW");
-  }
+  // 상태 변화 여부와 상관없이 매 주기마다 값을 출력한다 - 시리얼 모니터를
+  // 언제 열어도 바로 현재 값을 볼 수 있어야 하므로.
+  Serial.printf("door = %-6s (raw pin = %s)\n",
+                isOpen ? "OPEN" : "CLOSED",
+                digitalRead(REED_GPIO_NUM) == HIGH ? "HIGH" : "LOW");
 
-  delay(50);
+  delay(300);
 }
