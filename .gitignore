@@ -1,4 +1,5 @@
 .env
+esp32_cam_serial/wifi_credentials.h
 __pycache__/
 *.pyc
 server/static/latest.jpg

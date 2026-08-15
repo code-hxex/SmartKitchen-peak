@@ -32,11 +32,10 @@
 #include "esp_log.h"
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include "wifi_credentials.h"  // WIFI_SSID / WIFI_PASSWORD 정의 (git에 커밋 안 됨, .gitignore 참고)
 
-#define WIFI_SSID          "ICEE"
-#define WIFI_PASSWORD      "icee2026"
-#define BACKEND_EVENT_URL  "http://192.168.0.22:8000/api/events"
-#define BACKEND_DOOR_URL   "http://192.168.0.22:8000/api/door"
+#define BACKEND_EVENT_URL  "http://172.30.1.84:8000/api/events"
+#define BACKEND_DOOR_URL   "http://172.30.1.84:8000/api/door"
 #define DEVICE_ID          "xiao-cam-01"
 #define EVENT_POST_INTERVAL_MS 20000UL   // 20초마다 한 번씩 하드웨어 이벤트 전송
 #define EVENT_FRAMESIZE    FRAMESIZE_QVGA  // 이벤트 페이로드를 작게 유지 (메모리/전송시간 절약)

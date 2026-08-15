@@ -171,6 +171,7 @@
   <div id="detectSection">
     <div class="section-label" style="margin-top:0;">🔎 실시간 객체 탐지</div>
     <div><span id="doorStatus" class="door-badge unknown">🚪 문 상태 확인 중...</span></div>
+    <div id="doorRaw" style="font-size:11px;color:var(--muted);margin:2px 0 4px;">센서값: -</div>
     <button id="detectBtn" class="secondary" onclick="toggleDetect()">🔎 실시간 탐지 시작</button>
     <div id="detectStatus"></div>
 
@@ -349,6 +350,44 @@ async function answerConfirm(add) {
 const BACKEND_URL = "{{ backend_url }}";
 let lastDoorOpen = null; // 아직 한 번도 못 받아온 상태
 
+// 디버그용 상태: 마지막으로 받은 원시 데이터, 이 브라우저가 그걸 받은 시각(로컬),
+// SSE 연결 자체가 살아있는지 여부. is_open이 안 바뀌면 서버는 새 이벤트를 안 보내므로
+// (하드웨어가 변화가 있을 때만 POST함) "마지막 수신"은 실제 이벤트 시각에 고정된 채로
+// 두고, 그 대신 "몇 초 전" 부분만 매초 갱신해서 화면이 살아있는지/멎었는지 구분한다.
+let doorLastData = null;
+let doorLastReceivedAt = null;
+let sseConnected = false;
+
+function fmtTime(iso) {
+  if (!iso) return '-';
+  try {
+    const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z');
+    return d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch (e) { return iso; }
+}
+
+function renderDoorRaw() {
+  const el = document.getElementById('doorRaw');
+  const connTxt = sseConnected ? '🟢 실시간 연결됨' : '🔴 연결 끊김';
+  if (!doorLastData || !doorLastReceivedAt) {
+    el.textContent = `센서값: 아직 수신 없음 · ${connTxt}`;
+    return;
+  }
+  const secAgo = Math.max(0, Math.floor((Date.now() - doorLastReceivedAt.getTime()) / 1000));
+  el.textContent =
+    `센서값: is_open=${String(doorLastData.is_open)} · device_id=${doorLastData.device_id ?? '-'} · ` +
+    `마지막 수신 ${fmtTime(doorLastData.updated_at)} (${secAgo}초 전) · ${connTxt}`;
+}
+setInterval(renderDoorRaw, 1000); // 새 이벤트가 없어도 "N초 전"이 계속 흐르게
+
+// 브라우저는 탭이 백그라운드(다른 탭/창으로 전환, 화면 잠금 등)에 있으면 배터리
+// 절약을 위해 setInterval을 늦추거나 완전히 멈춘다. 그동안 "N초 전"이 그대로
+// 멈춰 보일 수 있는데, 탭이 다시 보이는 순간 즉시 한 번 다시 계산해서 밀린 시간을
+// 바로 따라잡는다 (절대 시각 기준 계산이라 멈춰 있던 동안의 실제 경과 시간이 그대로 반영됨).
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) renderDoorRaw();
+});
+
 function applyDoorState(data) {
   const badge = document.getElementById('doorStatus');
   if (data.is_open === true) {
@@ -362,6 +401,10 @@ function applyDoorState(data) {
     badge.className = 'door-badge unknown';
   }
 
+  doorLastData = data;
+  doorLastReceivedAt = new Date();
+  renderDoorRaw();
+
   // 문이 "막" 열렸을 때만 자동 시작, "막" 닫혔을 때만 자동 중지 (수동 조작과 충돌 방지)
   if (data.is_open === true && lastDoorOpen !== true && !detecting) {
     toggleDetect();
@@ -373,6 +416,7 @@ function applyDoorState(data) {
 
 function connectDoorStream() {
   const es = new EventSource(BACKEND_URL + '/api/door/stream');
+  es.onopen = () => { sseConnected = true; renderDoorRaw(); };
   es.onmessage = (evt) => {
     try {
       applyDoorState(JSON.parse(evt.data));
@@ -380,9 +424,11 @@ function connectDoorStream() {
   };
   es.onerror = () => {
     // 연결이 끊기면 브라우저가 자동 재연결을 시도한다 - 그동안 상태만 표시.
+    sseConnected = false;
     const badge = document.getElementById('doorStatus');
     badge.textContent = '🚪 백엔드 연결 끊김 (재연결 시도 중...)';
     badge.className = 'door-badge unknown';
+    renderDoorRaw();
   };
 }
 
