@@ -1,8 +1,11 @@
 """
-XIAO ESP32S3 Sense 카메라 -> USB 시리얼 캡처(Base64) -> Claude Vision(VLM) 음식 인식 -> 로컬 웹 확인.
+XIAO ESP32S3 Sense 카메라 -> WiFi HTTP 캡처 -> Claude Vision(VLM) 음식 인식 -> 로컬 웹 확인.
 
 브라우저에 실시간 미리보기(MJPEG)가 항상 표시되고, "촬영" 버튼을 누르면
 그 순간 고화질 프레임 1장을 따로 캡처해서 Claude에게 인식시킨다.
+
+보드와는 USB 케이블 없이 WiFi로만 통신한다 (보드가 자체 HTTP 서버를 띄워
+GET /jpg, GET /capture로 응답). 이 PC는 보드와 같은 WiFi(LAN)에 있어야 한다.
 
 사용법:
   1) pip install -r requirements.txt
@@ -10,11 +13,8 @@ XIAO ESP32S3 Sense 카메라 -> USB 시리얼 캡처(Base64) -> Claude Vision(VL
   3) python app.py
   4) 브라우저에서 http://127.0.0.1:5000 접속
 
-SERIAL_PORT은 기본적으로 자동 탐지된다 (XIAO ESP32S3의 USB VID 0x303A를 우선
-찾고, 없으면 연결된 USB-UART 브릿지가 하나뿐일 때 그것을 사용). 보드를 바꿔
-꽂아도(COM 번호가 바뀌어도) 별도 설정 없이 그대로 동작한다. 자동 탐지가
-안 맞으면 환경변수로 직접 지정해서 덮어쓸 수 있다:
-  SERIAL_PORT=COM9 (지정 시 자동 탐지보다 우선)
+환경변수:
+  BOARD_URL=http://172.30.1.28 (기본값. 보드가 DHCP로 새 IP를 받으면 여기를 갱신해야 함)
   ROTATE_DEGREES=0|90|180|270 (기본값 0)
   CLAUDE_MODEL=claude-haiku-4-5 (기본값, 빠른 테스트용)
 
@@ -35,8 +35,6 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 
 import anthropic
 import requests
-import serial
-import serial.tools.list_ports
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, render_template
 from PIL import Image
@@ -45,51 +43,7 @@ from PIL import Image
 _ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 load_dotenv(_ENV_PATH)
 
-# USB-UART 브릿지 벤더 ID (VID). 0x303A는 ESP32-S3의 USB-Serial/JTAG(XIAO ESP32S3
-# 계열)이라 최우선으로 찾는다. 나머지는 흔한 범용 USB-UART 칩(다른 보드/외장 어댑터).
-_ESPRESSIF_VID = 0x303A
-_GENERIC_UART_VIDS = {0x1A86, 0x10C4, 0x0403}  # CH340, CP210x, FTDI
-
-
-def _autodetect_serial_port() -> tuple[str | None, str]:
-    """연결된 COM 포트 중 보드로 추정되는 것을 찾는다.
-
-    반환값: (포트 또는 None, 판단 근거 설명). VID로 특정할 수 없고 USB-UART
-    브릿지가 여러 개거나 하나도 없으면 자동 탐지를 포기하고 None을 반환한다
-    (이 경우 호출부에서 SERIAL_PORT 기본값으로 폴백).
-    """
-    ports = list(serial.tools.list_ports.comports())
-
-    espressif = [p for p in ports if p.vid == _ESPRESSIF_VID]
-    if espressif:
-        return espressif[0].device, "Espressif USB-Serial/JTAG (VID_303A) 감지"
-
-    bridges = [p for p in ports if p.vid in _GENERIC_UART_VIDS]
-    if len(bridges) == 1:
-        return bridges[0].device, f"USB-UART 브릿지 1개 감지 (VID_{bridges[0].vid:04X})"
-
-    return None, (
-        "여러 개의 USB-UART 장치가 연결되어 있어 특정할 수 없음"
-        if len(bridges) > 1
-        else "연결된 보드를 찾지 못함"
-    )
-
-
-_env_serial_port = os.environ.get("SERIAL_PORT")
-if _env_serial_port:
-    SERIAL_PORT = _env_serial_port
-    print(f"시리얼 포트: {SERIAL_PORT} (환경변수 SERIAL_PORT로 지정됨)")
-else:
-    _detected_port, _detect_reason = _autodetect_serial_port()
-    if _detected_port:
-        SERIAL_PORT = _detected_port
-        print(f"시리얼 포트: {SERIAL_PORT} (자동 탐지: {_detect_reason})")
-    else:
-        SERIAL_PORT = "COM9"
-        print(f"시리얼 포트: {SERIAL_PORT} (자동 탐지 실패 - {_detect_reason}, 기본값 사용. "
-              "필요하면 SERIAL_PORT 환경변수로 직접 지정하세요)")
-
-BAUD_RATE = int(os.environ.get("BAUD_RATE", "921600"))
+BOARD_URL = os.environ.get("BOARD_URL", "http://172.30.1.28").rstrip("/")
 ROTATE_DEGREES = int(os.environ.get("ROTATE_DEGREES", "0"))
 MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5")
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://127.0.0.1:8000")
@@ -156,10 +110,8 @@ PROMPT = (
 
 app = Flask(__name__)
 
-_serial_lock = threading.Lock()  # 시리얼 포트에 대한 모든 접근(미리보기/캡처 공용)을 직렬화
-_ser: serial.Serial | None = None
-_recv_buf = bytearray()  # 시리얼에서 아직 소비하지 않은 바이트를 보관하는 버퍼
-_streaming_active = False  # ESP32가 현재 'S' 스트리밍 모드인지 여부
+_board_lock = threading.Lock()  # 보드에 대한 모든 HTTP 요청(미리보기/캡처 공용)을 직렬화
+                                 # (보드의 WebServer가 한 번에 요청 하나만 처리할 수 있음)
 
 _preview_lock = threading.Lock()
 _preview_frame: bytes | None = None
@@ -187,122 +139,36 @@ def get_anthropic_client() -> anthropic.Anthropic:
     return _anthropic_client
 
 
-def get_serial() -> serial.Serial:
-    """시리얼 포트를 (필요할 때만) 열고 보드의 READY 신호를 기다린다.
-
-    포트를 여는 순간 XIAO ESP32S3(USB CDC)가 리셋되도록 RTS만 펄스를 준다
-    (esptool의 hard-reset과 동일한 시퀀스). DTR까지 같이 토글하면 보드가
-    일반 부팅이 아니라 다운로드(부트로더) 모드로 들어가 버리므로 주의.
-    매 요청마다 새로 열지 않고 커넥션을 재사용한다. 호출 전 _serial_lock을
-    잡고 있어야 한다.
-    """
-    global _ser, _recv_buf, _streaming_active
-    if _ser is not None and _ser.is_open:
-        return _ser
-
-    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-    ser.dtr = False
-    ser.rts = True
-    time.sleep(0.15)
-    ser.rts = False
-    _recv_buf = bytearray()
-    deadline = time.time() + 8.0
-    while time.time() < deadline:
-        line = ser.readline().decode(errors="ignore").strip()
-        if line == "READY":
-            break
-        if line.startswith("ERR:"):
-            ser.close()
-            raise RuntimeError(f"ESP32 카메라 초기화 실패: {line}")
-    else:
-        ser.close()
-        raise TimeoutError(
-            f"{SERIAL_PORT}에서 READY 신호를 받지 못했습니다. 보드/포트를 확인하세요."
-        )
-
-    _ser = ser
-    _streaming_active = False  # 새로 연결(=보드 리셋)되었으니 스트리밍 상태 초기화
-    return _ser
+def fetch_preview_frame() -> bytes:
+    """보드의 GET /jpg로 저해상도 미리보기 프레임 1장을 가져온다."""
+    resp = requests.get(f"{BOARD_URL}/jpg", timeout=5)
+    resp.raise_for_status()
+    return resp.content
 
 
-def _read_until(ser: serial.Serial, marker: bytes, timeout: float) -> bytes:
-    """marker가 나올 때까지 읽어서, marker 이전까지의 바이트를 반환한다.
-
-    marker 뒤에 남는 바이트는 전역 버퍼(_recv_buf)에 보관되어 다음 호출에서 이어서 쓰인다.
-    """
-    global _recv_buf
-    deadline = time.time() + timeout
-    while True:
-        idx = _recv_buf.find(marker)
-        if idx != -1:
-            result = bytes(_recv_buf[:idx])
-            del _recv_buf[: idx + len(marker)]
-            return result
-        if time.time() > deadline:
-            raise TimeoutError(f"'{marker!r}' 대기 중 타임아웃")
-        chunk = ser.read(4096)
-        if chunk:
-            _recv_buf.extend(chunk)
-
-
-def _read_one_frame(ser: serial.Serial, begin_timeout: float, data_timeout: float) -> bytes:
-    """IMG_BEGIN/IMG_END 사이의 Base64 프레임 하나를 읽어 디코딩한다 (명령 전송은 하지 않음)."""
-    deadline = time.time() + begin_timeout
-    while True:
-        remaining = deadline - time.time()
-        if remaining <= 0:
-            raise TimeoutError("IMG_BEGIN 대기 시간 초과")
-        line = _read_until(ser, b"\n", timeout=remaining)
-        text = line.decode(errors="ignore").strip()
-        if text == "IMG_BEGIN":
-            break
-        if text.startswith("ERR:"):
-            raise RuntimeError(f"ESP32 오류: {text}")
-
-    b64_bytes = _read_until(ser, b"\nIMG_END\n", timeout=data_timeout)
-    b64_text = b64_bytes.decode("ascii", errors="strict").strip()
-    if not b64_text:
-        raise ValueError("빈 이미지 데이터를 수신했습니다")
-
-    return base64.b64decode(b64_text)
-
-
-def capture_single_frame(ser: serial.Serial) -> bytes:
-    """'C' 명령으로 고화질(SVGA) 프레임 1장을 캡처한다."""
-    ser.write(b"C")
-    return _read_one_frame(ser, begin_timeout=5.0, data_timeout=20.0)
-
-
-def stop_streaming(ser: serial.Serial) -> None:
-    """'X'로 스트리밍을 멈추고, 이미 전송 중이던 잔여 프레임을 모두 비운다."""
-    ser.write(b"X")
-    while True:
-        try:
-            _read_one_frame(ser, begin_timeout=0.3, data_timeout=3.0)
-        except TimeoutError:
-            break
+def fetch_hd_capture() -> bytes:
+    """보드의 GET /capture로 고화질 프레임 1장을 가져온다."""
+    resp = requests.get(f"{BOARD_URL}/capture", timeout=15)
+    resp.raise_for_status()
+    return resp.content
 
 
 def preview_worker() -> None:
-    """백그라운드에서 계속 저해상도 프레임을 받아 최신 미리보기로 저장한다."""
-    global _preview_frame, _streaming_active
+    """백그라운드에서 계속 보드에 GET /jpg를 요청해 최신 미리보기로 저장한다."""
+    global _preview_frame
     backoff = 0.5
     while True:
         if _capture_pause.is_set():
             time.sleep(0.05)
             continue
         try:
-            with _serial_lock:
-                ser = get_serial()
-                if not _streaming_active:
-                    ser.write(b"S")
-                    _streaming_active = True
-                jpeg = _read_one_frame(ser, begin_timeout=5.0, data_timeout=8.0)
+            with _board_lock:
+                jpeg = fetch_preview_frame()
             with _preview_lock:
                 _preview_frame = jpeg
             backoff = 0.5
+            time.sleep(0.15)  # 보드 WebServer에 너무 잦은 요청을 보내지 않도록 간격을 둠
         except Exception:
-            _streaming_active = False
             time.sleep(backoff)
             backoff = min(backoff * 2, 5.0)
 
@@ -427,7 +293,7 @@ def grouped_inventory() -> dict:
 @app.route("/")
 def index():
     return render_template(
-        "index.html", serial_port=SERIAL_PORT, model=MODEL, backend_url=BACKEND_URL
+        "index.html", board_url=BOARD_URL, model=MODEL, backend_url=BACKEND_URL
     )
 
 
@@ -460,17 +326,9 @@ def capture_and_identify() -> tuple[bytes | None, dict | None, str | None]:
     """
     _capture_pause.set()
     try:
-        global _streaming_active
-        with _serial_lock:
+        with _board_lock:
             try:
-                ser = get_serial()
-                if _streaming_active:
-                    stop_streaming(ser)
-                    _streaming_active = False
-                raw_jpeg = capture_single_frame(ser)
-                # 캡처 후 실시간 미리보기 재개
-                ser.write(b"S")
-                _streaming_active = True
+                raw_jpeg = fetch_hd_capture()
             except Exception as e:
                 return None, None, str(e)
     finally:
@@ -618,15 +476,15 @@ def dashboard():
 
 
 if __name__ == "__main__":
-    print(f"시리얼 포트: {SERIAL_PORT} @ {BAUD_RATE} baud")
+    print(f"보드 주소: {BOARD_URL}")
     print(f"사용 모델: {MODEL}")
     load_inventory()
     print(f"재고 {len(_inventory)}건 불러옴 ({INVENTORY_PATH})")
     try:
-        get_serial()
-        print("ESP32 카메라 연결 확인됨 (READY)")
+        fetch_preview_frame()
+        print("ESP32 카메라 연결 확인됨")
     except Exception as e:
-        print(f"경고: 시작 시 ESP32 연결 실패 - {e}")
+        print(f"경고: 시작 시 ESP32 연결 실패 - {e} (BOARD_URL={BOARD_URL} 확인 필요)")
     if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_API")):
         print("경고: .env에 API 키가 설정되어 있지 않습니다 (ANTHROPIC_API_KEY 또는 CLAUDE_API).")
 

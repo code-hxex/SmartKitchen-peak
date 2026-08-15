@@ -1,25 +1,15 @@
-// XIAO ESP32S3 Sense - USB 시리얼로 카메라 이미지 캡처 (Base64 전송)
+// XIAO ESP32S3 Sense - WiFi HTTP로 카메라 이미지 제공 (USB 시리얼 불필요)
 //                        + WiFi로 백엔드(FastAPI)에 주기적으로 하드웨어 이벤트 전송
 //                        + 리드스위치(보드 헤더 라벨 D10 = 칩 GPIO9)로 냉장고 문 개폐 감지
 //
-// 명령 (1바이트, USB 시리얼):
-//   'C' : 고화질(HD) 프레임 1장 캡처해서 전송
-//   'S' : 저해상도(VGA) 실시간 미리보기 스트리밍 시작 (연속 전송)
-//   'X' : 스트리밍 중 이 명령을 받으면 스트리밍을 멈추고 HD로 복귀
-//
-// 각 프레임은 아래 형식으로 전송된다 (텍스트 전용 프로토콜):
-//   IMG_BEGIN\n
-//   <base64 데이터, 줄바꿈 없이 한 줄>\n
-//   IMG_END\n
+// HTTP 엔드포인트 (보드 자신의 IP:80):
+//   GET /jpg     : 저해상도(VGA) 미리보기 프레임 1장 (PC가 짧은 주기로 반복 호출해서
+//                  실시간 미리보기처럼 사용)
+//   GET /capture : 고화질(HD) 프레임 1장
 //
 // 부팅 시 카메라 초기화에 성공하면 "READY\n"를, 실패하면 "ERR:CAMERA_INIT_FAILED\n"를
-// 출력한다. 카메라가 실패해도 이후 코드는 계속 진행한다 (WiFi/리드스위치는 카메라와
-// 무관하게 동작해야 하므로 더 이상 무한루프로 멈추지 않는다). 'C'/'S' 명령은 카메라가
-// 없으면 그때그때 ERR:CAMERA_INIT_FAILED로 응답한다.
-//
-// 중요: 위 시리얼 프로토콜은 텍스트 전용이라 다른 출력이 한 글자라도 섞이면
-// PC측 파서가 깨진다. 그래서 아래 WiFi/HTTP 관련 코드는 Serial에 절대
-// 아무것도 출력하지 않는다 (성공/실패 여부는 백엔드의 GET /api/events, GET /api/door로 확인).
+// 시리얼(디버그용, 더 이상 프로토콜로 쓰이지 않음)에 출력한다. 카메라 초기화가 실패해도
+// WiFi/리드스위치는 계속 동작한다 - /jpg, /capture는 그때그때 503으로 응답한다.
 //
 // 리드스위치(HAM4318, 보드 헤더 라벨 D10 = 칩 GPIO9): INPUT_PULLUP으로 연결.
 // 문이 닫혀 자석이 가까이 오면 스위치가 닫혀 핀이 LOW(문 닫힘), 문이 열려 자석이
@@ -32,6 +22,8 @@
 #include "esp_log.h"
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
 #include "wifi_credentials.h"  // WIFI_SSID / WIFI_PASSWORD 정의 (git에 커밋 안 됨, .gitignore 참고)
 
 #define BACKEND_EVENT_URL  "http://172.30.1.84:8000/api/events"
@@ -43,6 +35,8 @@
 
 static unsigned long lastEventPostMs = 0;
 static bool cameraReady = false;
+
+WebServer httpServer(80);
 
 // ---- 리드스위치 (문 개폐 감지, 보드 실크스크린 표기 D10 = 칩 GPIO9) ----
 #define DOOR_GPIO_NUM 9
@@ -73,14 +67,21 @@ static int doorLastSentState = -1;     // -1: 아직 전송 안 함, 0: 닫힘 �
 static const char B64_TABLE[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-// 미리보기 해상도/품질 - 실시간 스트리밍용, fps와 화질의 균형점
-#define PREVIEW_FRAMESIZE FRAMESIZE_VGA   // 640x480 (기존 CIF 400x296 보다 선명함)
-#define PREVIEW_QUALITY   10              // 숫자가 작을수록 고화질 (기존 12 -> 10)
+// 미리보기 해상도/품질 - 실시간 미리보기용, fps와 화질의 균형점
+#define PREVIEW_FRAMESIZE FRAMESIZE_VGA   // 640x480
+#define PREVIEW_QUALITY   10              // 숫자가 작을수록 고화질
 
-// 촬영('C') 설정 - 사용자 지정값
+// 촬영 설정 - 사용자 지정값
 #define CAPTURE_FRAMESIZE FRAMESIZE_HD    // 1280x720
 #define CAPTURE_QUALITY   4               // 숫자가 작을수록 고화질
 #define XCLK_FREQ_HZ      20000000        // 20MHz
+
+// 카메라 센서는 한 번에 하나의 해상도/품질만 가질 수 있어서, /jpg(미리보기)와
+// /capture(HD)가 매번 재설정하면 느려진다. 마지막으로 설정한 모드를 기억해뒀다가
+// 실제로 바뀔 때만 센서를 재설정한다. postHardwareEventSilently()도 이 상태를
+// 공유하므로 임시로 EVENT_FRAMESIZE로 바꿨다가 반드시 원래 모드로 되돌린다.
+enum CamMode { CAM_MODE_CAPTURE, CAM_MODE_PREVIEW };
+static CamMode camMode = CAM_MODE_CAPTURE;  // initCamera()가 CAPTURE_FRAMESIZE로 초기화함
 
 // 해상도 전환 후 AE/AWB가 새 프레임 크기에 맞춰 재계산되도록 몇 프레임 버린다.
 static void settleExposure(int frames) {
@@ -89,6 +90,20 @@ static void settleExposure(int frames) {
     if (w) esp_camera_fb_return(w);
     delay(60);
   }
+}
+
+static void setCamMode(CamMode mode) {
+  if (camMode == mode) return;
+  sensor_t *s = esp_camera_sensor_get();
+  if (mode == CAM_MODE_PREVIEW) {
+    s->set_framesize(s, PREVIEW_FRAMESIZE);
+    s->set_quality(s, PREVIEW_QUALITY);
+  } else {
+    s->set_framesize(s, CAPTURE_FRAMESIZE);
+    s->set_quality(s, CAPTURE_QUALITY);
+  }
+  settleExposure(2);
+  camMode = mode;
 }
 
 // OV2640 센서 이미지 처리 파라미터 튜닝 (사용자 지정값만 설정, 나머지는 센서 기본값 유지)
@@ -132,45 +147,6 @@ bool initCamera() {
   return true;
 }
 
-// data를 Base64로 인코딩하여 Serial로 직접 흘려보낸다 (메모리에 전체 결과를 만들지 않음)
-void streamBase64(const uint8_t *data, size_t len) {
-  uint8_t out[512];  // 4의 배수 크기 청크 버퍼
-  size_t outLen = 0;
-  size_t i = 0;
-
-  while (i + 3 <= len) {
-    uint32_t n = ((uint32_t)data[i] << 16) | ((uint32_t)data[i + 1] << 8) | data[i + 2];
-    out[outLen++] = B64_TABLE[(n >> 18) & 0x3F];
-    out[outLen++] = B64_TABLE[(n >> 12) & 0x3F];
-    out[outLen++] = B64_TABLE[(n >> 6) & 0x3F];
-    out[outLen++] = B64_TABLE[n & 0x3F];
-    i += 3;
-    if (outLen >= sizeof(out)) {
-      Serial.write(out, outLen);
-      outLen = 0;
-    }
-  }
-
-  size_t rem = len - i;
-  if (rem == 1) {
-    uint32_t n = ((uint32_t)data[i]) << 16;
-    out[outLen++] = B64_TABLE[(n >> 18) & 0x3F];
-    out[outLen++] = B64_TABLE[(n >> 12) & 0x3F];
-    out[outLen++] = '=';
-    out[outLen++] = '=';
-  } else if (rem == 2) {
-    uint32_t n = ((uint32_t)data[i] << 16) | ((uint32_t)data[i + 1] << 8);
-    out[outLen++] = B64_TABLE[(n >> 18) & 0x3F];
-    out[outLen++] = B64_TABLE[(n >> 12) & 0x3F];
-    out[outLen++] = B64_TABLE[(n >> 6) & 0x3F];
-    out[outLen++] = '=';
-  }
-
-  if (outLen > 0) {
-    Serial.write(out, outLen);
-  }
-}
-
 // streamBase64와 동일한 인코딩이지만 Serial이 아니라 메모리 버퍼에 쓴다.
 // 반환값은 기록한 바이트 수. out은 최소 4*((len+2)/3) 바이트여야 한다.
 size_t base64EncodeInto(const uint8_t *data, size_t len, char *out) {
@@ -202,11 +178,11 @@ size_t base64EncodeInto(const uint8_t *data, size_t len, char *out) {
 
 // 작은 프레임을 캡처해서 백엔드 POST /api/events 로 보낸다.
 // (센서가 아직 없으므로 frame_base64만 채우고 sensor 필드는 생략)
-// Serial에는 절대 아무것도 출력하지 않는다 - 카메라 시리얼 프로토콜 보호.
 void postHardwareEventSilently() {
   if (!cameraReady) return;
   if (WiFi.status() != WL_CONNECTED) return;
 
+  CamMode modeBeforeEvent = camMode;  // 이벤트 캡처 후 원래 모드로 복귀하기 위해 기억
   sensor_t *s = esp_camera_sensor_get();
   s->set_framesize(s, EVENT_FRAMESIZE);
   s->set_quality(s, EVENT_QUALITY);
@@ -214,8 +190,14 @@ void postHardwareEventSilently() {
 
   camera_fb_t *fb = esp_camera_fb_get();
 
-  s->set_framesize(s, CAPTURE_FRAMESIZE);
-  s->set_quality(s, CAPTURE_QUALITY);
+  if (modeBeforeEvent == CAM_MODE_PREVIEW) {
+    s->set_framesize(s, PREVIEW_FRAMESIZE);
+    s->set_quality(s, PREVIEW_QUALITY);
+  } else {
+    s->set_framesize(s, CAPTURE_FRAMESIZE);
+    s->set_quality(s, CAPTURE_QUALITY);
+  }
+  camMode = modeBeforeEvent;
 
   if (!fb) return;
 
@@ -259,8 +241,7 @@ bool readDoorIsOpenRaw() {
   return DOOR_ACTIVE_LOW_MEANS_OPEN ? !pinHigh : pinHigh;
 }
 
-// 문 개폐 상태를 백엔드로 전송한다. postHardwareEventSilently와 마찬가지로
-// Serial에는 절대 아무것도 출력하지 않는다 - 카메라 시리얼 프로토콜 보호.
+// 문 개폐 상태를 백엔드로 전송한다.
 void postDoorStateSilently(bool isOpen) {
   if (WiFi.status() != WL_CONNECTED) return;
 
@@ -298,47 +279,40 @@ void checkDoorState() {
   }
 }
 
-void sendFrame() {
+// GET /jpg - 저해상도 미리보기 프레임 1장. PC가 짧은 주기로 반복 호출한다.
+void handleJpg() {
   if (!cameraReady) {
-    Serial.print("ERR:CAMERA_INIT_FAILED\n");
+    httpServer.send(503, "text/plain", "camera not ready");
     return;
   }
+  setCamMode(CAM_MODE_PREVIEW);
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
-    Serial.print("ERR:CAPTURE_FAILED\n");
+    httpServer.send(503, "text/plain", "capture failed");
     return;
   }
-  Serial.print("IMG_BEGIN\n");
-  streamBase64(fb->buf, fb->len);
-  Serial.print("\nIMG_END\n");
-  Serial.flush();
+  httpServer.setContentLength(fb->len);
+  httpServer.send(200, "image/jpeg", "");
+  httpServer.client().write(fb->buf, fb->len);
   esp_camera_fb_return(fb);
 }
 
-// 실시간 미리보기: 저해상도로 전환해서 'X'를 받을 때까지 계속 프레임을 보낸다.
-void streamLoop() {
+// GET /capture - 고화질(HD) 프레임 1장.
+void handleCapture() {
   if (!cameraReady) {
-    Serial.print("ERR:CAMERA_INIT_FAILED\n");
+    httpServer.send(503, "text/plain", "camera not ready");
     return;
   }
-  sensor_t *s = esp_camera_sensor_get();
-  s->set_framesize(s, PREVIEW_FRAMESIZE);
-  s->set_quality(s, PREVIEW_QUALITY);
-  settleExposure(2);
-
-  while (true) {
-    if (Serial.available() > 0) {
-      int c = Serial.read();
-      if (c == 'X' || c == 'x') break;
-      // 스트리밍 중에는 다른 명령은 무시
-    }
-    sendFrame();
-    delay(50);
+  setCamMode(CAM_MODE_CAPTURE);
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    httpServer.send(503, "text/plain", "capture failed");
+    return;
   }
-
-  s->set_framesize(s, CAPTURE_FRAMESIZE);
-  s->set_quality(s, CAPTURE_QUALITY);
-  settleExposure(2);
+  httpServer.setContentLength(fb->len);
+  httpServer.send(200, "image/jpeg", "");
+  httpServer.client().write(fb->buf, fb->len);
+  esp_camera_fb_return(fb);
 }
 
 void setup() {
@@ -347,30 +321,36 @@ void setup() {
 
   pinMode(DOOR_GPIO_NUM, INPUT_PULLUP);
 
-  // ESP-IDF 로그(cam_hal 등)가 USB 시리얼로 나가면 IMG_BEGIN/base64/IMG_END
-  // 프로토콜 스트림 중간에 끼어들어 데이터가 깨질 수 있으므로 전부 끈다.
   esp_log_level_set("*", ESP_LOG_NONE);
 
   cameraReady = initCamera();
-  // 카메라 초기화에 실패해도 멈추지 않는다 - WiFi/리드스위치는 카메라와 무관하게
-  // 동작해야 한다. 'READY' 대신 실패 메시지를 한 번 출력하고 계속 진행한다.
   Serial.print(cameraReady ? "READY\n" : "ERR:CAMERA_INIT_FAILED\n");
 
-  // WiFi.begin()은 논블로킹이라 여기서 호출해도 READY 출력 타이밍(PC측 부팅 대기)에
-  // 영향을 주지 않는다. 연결 여부는 loop()에서 주기적으로 확인한다.
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  uint32_t wifiDeadline = millis() + 15000;
+  while (WiFi.status() != WL_CONNECTED && millis() < wifiDeadline) {
+    delay(200);
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("WIFI_IP:");
+    Serial.println(WiFi.localIP());
+    if (MDNS.begin(DEVICE_ID)) {
+      Serial.print("MDNS:http://");
+      Serial.print(DEVICE_ID);
+      Serial.println(".local");
+    }
+  } else {
+    Serial.println("WIFI_CONNECT_TIMEOUT");
+  }
+
+  httpServer.on("/jpg", handleJpg);
+  httpServer.on("/capture", handleCapture);
+  httpServer.begin();
 }
 
 void loop() {
-  if (Serial.available() > 0) {
-    int c = Serial.read();
-    if (c == 'C' || c == 'c') {
-      sendFrame();
-    } else if (c == 's' || c == 'S') {
-      streamLoop();
-    }
-  }
+  httpServer.handleClient();
 
   if (millis() - lastEventPostMs >= EVENT_POST_INTERVAL_MS) {
     lastEventPostMs = millis();
