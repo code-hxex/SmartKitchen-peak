@@ -10,8 +10,11 @@ XIAO ESP32S3 Sense 카메라 -> USB 시리얼 캡처(Base64) -> Claude Vision(VL
   3) python app.py
   4) 브라우저에서 http://127.0.0.1:5000 접속
 
-보드가 시리얼로 이미지를 못 보내거나 사진이 옆으로 누워 보이면 환경변수로 조정:
-  SERIAL_PORT=COM9 (기본값)
+SERIAL_PORT은 기본적으로 자동 탐지된다 (XIAO ESP32S3의 USB VID 0x303A를 우선
+찾고, 없으면 연결된 USB-UART 브릿지가 하나뿐일 때 그것을 사용). 보드를 바꿔
+꽂아도(COM 번호가 바뀌어도) 별도 설정 없이 그대로 동작한다. 자동 탐지가
+안 맞으면 환경변수로 직접 지정해서 덮어쓸 수 있다:
+  SERIAL_PORT=COM9 (지정 시 자동 탐지보다 우선)
   ROTATE_DEGREES=0|90|180|270 (기본값 0)
   CLAUDE_MODEL=claude-haiku-4-5 (기본값, 빠른 테스트용)
 
@@ -33,6 +36,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 import anthropic
 import requests
 import serial
+import serial.tools.list_ports
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, render_template
 from PIL import Image
@@ -41,7 +45,50 @@ from PIL import Image
 _ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 load_dotenv(_ENV_PATH)
 
-SERIAL_PORT = os.environ.get("SERIAL_PORT", "COM9")
+# USB-UART 브릿지 벤더 ID (VID). 0x303A는 ESP32-S3의 USB-Serial/JTAG(XIAO ESP32S3
+# 계열)이라 최우선으로 찾는다. 나머지는 흔한 범용 USB-UART 칩(다른 보드/외장 어댑터).
+_ESPRESSIF_VID = 0x303A
+_GENERIC_UART_VIDS = {0x1A86, 0x10C4, 0x0403}  # CH340, CP210x, FTDI
+
+
+def _autodetect_serial_port() -> tuple[str | None, str]:
+    """연결된 COM 포트 중 보드로 추정되는 것을 찾는다.
+
+    반환값: (포트 또는 None, 판단 근거 설명). VID로 특정할 수 없고 USB-UART
+    브릿지가 여러 개거나 하나도 없으면 자동 탐지를 포기하고 None을 반환한다
+    (이 경우 호출부에서 SERIAL_PORT 기본값으로 폴백).
+    """
+    ports = list(serial.tools.list_ports.comports())
+
+    espressif = [p for p in ports if p.vid == _ESPRESSIF_VID]
+    if espressif:
+        return espressif[0].device, "Espressif USB-Serial/JTAG (VID_303A) 감지"
+
+    bridges = [p for p in ports if p.vid in _GENERIC_UART_VIDS]
+    if len(bridges) == 1:
+        return bridges[0].device, f"USB-UART 브릿지 1개 감지 (VID_{bridges[0].vid:04X})"
+
+    return None, (
+        "여러 개의 USB-UART 장치가 연결되어 있어 특정할 수 없음"
+        if len(bridges) > 1
+        else "연결된 보드를 찾지 못함"
+    )
+
+
+_env_serial_port = os.environ.get("SERIAL_PORT")
+if _env_serial_port:
+    SERIAL_PORT = _env_serial_port
+    print(f"시리얼 포트: {SERIAL_PORT} (환경변수 SERIAL_PORT로 지정됨)")
+else:
+    _detected_port, _detect_reason = _autodetect_serial_port()
+    if _detected_port:
+        SERIAL_PORT = _detected_port
+        print(f"시리얼 포트: {SERIAL_PORT} (자동 탐지: {_detect_reason})")
+    else:
+        SERIAL_PORT = "COM9"
+        print(f"시리얼 포트: {SERIAL_PORT} (자동 탐지 실패 - {_detect_reason}, 기본값 사용. "
+              "필요하면 SERIAL_PORT 환경변수로 직접 지정하세요)")
+
 BAUD_RATE = int(os.environ.get("BAUD_RATE", "921600"))
 ROTATE_DEGREES = int(os.environ.get("ROTATE_DEGREES", "0"))
 MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5")
